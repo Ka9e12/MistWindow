@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>MistWindow - 胧雾清窗</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: #050508;
+            overflow: hidden;
+            touch-action: none;
+            user-select: none;
+        }
+        #videoUpload { display: none; }
+        canvas { width: 100vw; height: 100vh; position: absolute; inset: 0; will-change: transform; }
+        
+        /* 优雅的启动遮罩层 */
+        #start-mask {
+            position: fixed; inset: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle at center, #11141a 0%, #050608 100%);
+            z-index: 999; display: flex; flex-direction: column; justify-content: center; align-items: center;
+            color: #fff; transition: opacity 0.6s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.6s;
+        }
+        .start-btn {
+            padding: 14px 40px; background: #ffffff; color: #000000; border: none;
+            border-radius: 30px; font-weight: 600; cursor: pointer; font-size: 15px; letter-spacing: 1px;
+            box-shadow: 0 10px 30px rgba(255,255,255,0.15); transition: all 0.3s ease;
+        }
+        .start-btn:hover { background: #f3f4f6; transform: translateY(-2px); box-shadow: 0 15px 35px rgba(255,255,255,0.25); }
+        .start-btn:active { transform: translateY(0); }
+        
+        .ui-panel { transition: opacity 0.4s ease, transform 0.4s ease; }
+        .ui-hidden { opacity: 0; transform: translateY(20px); pointer-events: none; }
+    </style>
+</head>
+<body class="w-screen h-screen relative flex items-center justify-center">
+
+    <div id="start-mask">
+        <h1 class="text-3xl sm:text-4xl font-light tracking-[0.4em] text-white/90 mb-3 pl-[0.4em]">MISTWINDOW</h1>
+        <p class="text-xs sm:text-sm font-light tracking-[0.2em] text-white/40 mb-12">胧 雾 清 窗</p>
+        <button class="start-btn" id="start-btn">开启体验</button>
+    </div>
+
+    <canvas id="mainCanvas"></canvas>
+
+    <div class="hidden">
+        <video id="webcam" playsinline muted></video>
+        <video id="localVideo" playsinline loop muted></video>
+    </div>
+
+    <div class="absolute top-6 right-6 z-50">
+        <button id="toggleUiBtn" class="w-11 h-11 rounded-full backdrop-blur-3xl bg-black/40 border border-white/10 text-white flex items-center justify-center text-lg shadow-xl hover:bg-white/10 active:scale-95 transition-all duration-300" title="切换UI洁净模式">
+            👁️
+        </button>
+    </div>
+
+    <div id="controlPanel" class="ui-panel absolute bottom-6 sm:bottom-10 z-50 flex flex-col sm:flex-row items-center gap-3 px-4 w-full justify-center pointer-events-none">
+        <div class="flex items-center gap-3 pointer-events-auto flex-wrap justify-center">
+            
+            <div class="backdrop-blur-3xl bg-black/40 border border-white/10 rounded-full p-1.5 shadow-2xl flex items-center space-x-1 text-white">
+                <div class="flex items-center pl-3 pr-2 border-r border-white/10">
+                    <span id="statusIndicator" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                </div>
+                <button id="srcCam" class="px-5 py-1.5 text-xs rounded-full font-medium transition-all duration-300 flex items-center space-x-1">
+                    <span>📷</span> <span>摄像头</span>
+                </button>
+                <button id="srcLocal" class="px-5 py-1.5 text-xs rounded-full font-medium transition-all duration-300 flex items-center space-x-1">
+                    <span>📁</span> <span>本地视频</span>
+                </button>
+                <input type="file" id="videoUpload" accept="video/*">
+            </div>
+
+            <div class="backdrop-blur-3xl bg-black/40 border border-white/10 rounded-full p-1.5 shadow-2xl flex items-center space-x-1 text-white">
+                <button id="modeRecover" class="px-5 py-1.5 text-xs rounded-full font-medium transition-all duration-300 flex items-center space-x-1">
+                    <span>⏳</span> <span>凝雾</span>
+                </button>
+                <button id="modeDissolve" class="px-5 py-1.5 text-xs rounded-full font-medium transition-all duration-300 flex items-center space-x-1">
+                    <span>✨</span> <span>常清</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const mainCanvas = document.getElementById('mainCanvas');
+        const mainCtx = mainCanvas.getContext('2d', { alpha: false });
+        const webcam = document.getElementById('webcam');
+        const localVideo = document.getElementById('localVideo');
+        const videoUpload = document.getElementById('videoUpload');
+        
+        const statusIndicator = document.getElementById('statusIndicator');
+        const srcCam = document.getElementById('srcCam');
+        const srcLocal = document.getElementById('srcLocal');
+        const modeRecover = document.getElementById('modeRecover');
+        const modeDissolve = document.getElementById('modeDissolve');
+        const toggleUiBtn = document.getElementById('toggleUiBtn');
+        const controlPanel = document.getElementById('controlPanel');
+
+        // 离屏双缓冲区画布组
+        const maskCanvas = document.createElement('canvas');
+        const maskCtx = maskCanvas.getContext('2d');
+        const fogCanvas = document.createElement('canvas');
+        const fogCtx = fogCanvas.getContext('2d');
+        const dropletCanvas = document.createElement('canvas');
+        const dropletCtx = dropletCanvas.getContext('2d');
+
+        // 气候与调校设定
+        const FOG_OPACITY = 0.93;       
+        const RECOVER_ALPHA = 0.0075;   
+        const NODE_BRUSH_RADIUS = 26;    
+
+        let currentSourceType = 'webcam'; 
+        let eraseMode = 'recover'; 
+        let isCamActive = false;
+        let uiVisible = true;
+        let appStarted = false; // 是否点击了开启体验
+        let nativeStream = null;         
+        let dpr = window.devicePixelRatio || 1; 
+        
+        let lastHandSkeleton = null;     
+        let lastPointerPos = null;       
+        let activeDroplets = [];        
+        let isInteracting = false;
+        let clearedTopIntervals = [];
+
+        function updateUIState() {
+            if (currentSourceType === 'webcam') {
+                srcCam.classList.add('bg-white/10', 'text-white', 'shadow-sm');
+                srcCam.classList.remove('text-white/60', 'hover:text-white', 'hover:bg-white/5');
+                srcLocal.classList.remove('bg-white/10', 'text-white', 'shadow-sm');
+                srcLocal.classList.add('text-white/60', 'hover:text-white', 'hover:bg-white/5');
+            } else {
+                srcLocal.classList.add('bg-white/10', 'text-white', 'shadow-sm');
+                srcLocal.classList.remove('text-white/60', 'hover:text-white', 'hover:bg-white/5');
+                srcCam.classList.remove('bg-white/10', 'text-white', 'shadow-sm');
+                srcCam.classList.add('text-white/60', 'hover:text-white', 'hover:bg-white/5');
+            }
+
+            if (eraseMode === 'recover') {
+                modeRecover.classList.add('bg-white/10', 'text-white', 'shadow-sm');
+                modeRecover.classList.remove('text-white/60', 'hover:text-white', 'hover:bg-white/5');
+                modeDissolve.classList.remove('bg-white/10', 'text-white', 'shadow-sm');
+                modeDissolve.classList.add('text-white/60', 'hover:text-white', 'hover:bg-white/5');
+            } else {
+                modeDissolve.classList.add('bg-white/10', 'text-white', 'shadow-sm');
+                modeDissolve.classList.remove('text-white/60', 'hover:text-white', 'hover:bg-white/5');
+                modeRecover.classList.remove('bg-white/10', 'text-white', 'shadow-sm');
+                modeRecover.classList.add('text-white/60', 'hover:text-white', 'hover:bg-white/5');
+            }
+        }
+
+        function generateOrganicDroplets(w, h) {
+            dropletCanvas.width = w;
+            dropletCanvas.height = h;
+            dropletCtx.clearRect(0, 0, w, h);
+            dropletCtx.fillStyle = 'rgba(235, 240, 248, 0.02)';
+            dropletCtx.fillRect(0, 0, w, h);
+
+            const layers = [
+                { count: (w * h) / 150, minR: 0.3, maxR: 0.8, alpha: 0.14 }, 
+                { count: (w * h) / 1300, minR: 1.0, maxR: 2.1, alpha: 0.24 }, 
+                { count: (w * h) / 7500, minR: 2.8, maxR: 4.8, alpha: 0.32 }  
+            ];
+
+            layers.forEach(layer => {
+                for (let i = 0; i < layer.count; i++) {
+                    const x = Math.random() * w;
+                    const y = Math.random() * h;
+                    const r = Math.random() * (layer.maxR - layer.minR) + layer.minR;
+                    const grad = dropletCtx.createRadialGradient(x - r*0.2, y - r*0.2, 0, x, y, r);
+                    grad.addColorStop(0, `rgba(255, 255, 255, ${layer.alpha * 1.4})`);
+                    grad.addColorStop(0.7, `rgba(255, 255, 255, ${layer.alpha})`);
+                    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+                    dropletCtx.fillStyle = grad;
+                    dropletCtx.beginPath();
+                    dropletCtx.arc(x, y, r, 0, Math.PI * 2);
+                    dropletCtx.fill();
+                }
+            });
+        }
+
+        function initCanvasSize() {
+            dpr = window.devicePixelRatio || 1;
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = maskCanvas.width;
+            tempCanvas.height = maskCanvas.height;
+            if(maskCanvas.width > 0) tempCanvas.getContext('2d').drawImage(maskCanvas, 0, 0);
+
+            mainCanvas.width = w * dpr;
+            mainCanvas.height = h * dpr;
+            maskCanvas.width = w * dpr;
+            maskCanvas.height = h * dpr;
+            fogCanvas.width = w * dpr;
+            fogCanvas.height = h * dpr;
+
+            generateOrganicDroplets(mainCanvas.width, mainCanvas.height);
+
+            maskCtx.fillStyle = 'white';
+            maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+            if(tempCanvas.width > 0) {
+                maskCtx.drawImage(tempCanvas, 0, 0, tempCanvas.width, tempCanvas.height, 0, 0, maskCanvas.width, maskCanvas.height);
+            }
+            clearedTopIntervals = [];
+        }
+        window.addEventListener('resize', initCanvasSize);
+        initCanvasSize();
+
+        function updateAndRenderGravityDroplets(pw, ph) {
+            if (eraseMode === 'recover' && Math.random() < 0.25) {
+                clearedTopIntervals = clearedTopIntervals.map(inter => {
+                    return { start: inter.start, end: inter.end, opacity: inter.opacity - RECOVER_ALPHA * 4 };
+                }).filter(inter => inter.opacity > 0.3);
+            }
+
+            if (activeDroplets.length < 2 && Math.random() < 0.008) {
+                const startX = Math.random() * (pw - 60) + 30;
+                let isInsideClearedArea = false;
+                for (let inter of clearedTopIntervals) {
+                    if (startX >= inter.start && startX <= inter.end) {
+                        isInsideClearedArea = true;
+                        break;
+                    }
+                }
+
+                if (!isInsideClearedArea) {
+                    activeDroplets.push({
+                        x: startX, y: -10, lastX: startX, lastY: -10,
+                        r: (Math.random() * 0.9 + 2.4) * dpr, 
+                        vy: 0, pauseTimer: 0, wobble: Math.random() * 100, slidingTicks: 0
+                    });
+                }
+            }
+
+            if (activeDroplets.length === 0) return;
+
+            maskCtx.save();
+            maskCtx.globalCompositeOperation = 'destination-out';
+
+            for (let i = activeDroplets.length - 1; i >= 0; i--) {
+                const d = activeDroplets[i];
+                if (d.pauseTimer > 0) {
+                    d.pauseTimer--;
+                    d.vy = 0.05 * dpr; 
+                } else {
+                    d.slidingTicks++;
+                    d.vy += 0.12 * dpr; 
+                    if (d.vy > 5.5 * dpr) d.vy = 5.5 * dpr; 
+
+                    if (d.slidingTicks > 35 && Math.random() < 0.025) {
+                        d.pauseTimer = Math.floor(Math.random() * 15) + 6; 
+                        d.slidingTicks = 0;
+                    }
+                }
+
+                d.wobble += 0.09;
+                d.x += Math.sin(d.wobble) * 0.30 * dpr;
+                d.y += d.vy;
+
+                maskCtx.strokeStyle = 'rgba(0,0,0,1)';
+                maskCtx.lineWidth = d.r * 2;
+                maskCtx.lineCap = 'round';
+                maskCtx.lineJoin = 'round';
+                
+                maskCtx.beginPath();
+                maskCtx.moveTo(d.lastX, d.lastY);
+                maskCtx.lineTo(d.x, d.y);
+                maskCtx.stroke();
+
+                d.lastX = d.x; d.lastY = d.y;
+                if (d.y > ph + 20) activeDroplets.splice(i, 1);
+            }
+            maskCtx.restore();
+        }
+
+        function drawActiveDropletHeads(ctx) {
+            activeDroplets.forEach(d => {
+                ctx.save();
+                const edgeGrad = ctx.createRadialGradient(d.x, d.y, d.r * 0.6, d.x, d.y, d.r * 1.3);
+                edgeGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+                edgeGrad.addColorStop(1, 'rgba(0, 0, 0, 0.05)');
+                ctx.fillStyle = edgeGrad;
+                ctx.beginPath(); ctx.arc(d.x, d.y, d.r * 1.3, 0, Math.PI * 2); ctx.fill();
+
+                const specularGrad = ctx.createRadialGradient(d.x - d.r * 0.2, d.y - d.r * 0.2, 0, d.x - d.r * 0.2, d.y - d.r * 0.2, d.r * 0.5);
+                specularGrad.addColorStop(0, 'rgba(255, 255, 255, 0.26)');
+                specularGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+                ctx.fillStyle = specularGrad;
+                ctx.beginPath(); ctx.arc(d.x - d.r * 0.2, d.y - d.r * 0.2, d.r * 0.5, 0, Math.PI * 2); ctx.fill();
+                ctx.restore();
+            });
+        }
+
+        function renderLoop() {
+            if (!appStarted) return; // 未开启体验前不浪费算力渲染
+            
+            const pw = mainCanvas.width;  
+            const ph = mainCanvas.height; 
+
+            if (eraseMode === 'recover') {
+                maskCtx.save();
+                maskCtx.globalCompositeOperation = 'source-over';
+                maskCtx.fillStyle = `rgba(255, 255, 255, ${RECOVER_ALPHA})`;
+                maskCtx.fillRect(0, 0, pw, ph);
+                maskCtx.restore();
+            }
+            updateAndRenderGravityDroplets(pw, ph);
+
+            mainCtx.clearRect(0, 0, pw, ph);
+            if (currentSourceType === 'webcam' && isCamActive) {
+                mainCtx.save(); mainCtx.translate(pw, 0); mainCtx.scale(-1, 1); 
+                drawCoverImage(mainCtx, webcam, pw, ph); mainCtx.restore();
+            } else if (currentSourceType === 'video' && localVideo.readyState >= 2) {
+                drawCoverImage(mainCtx, localVideo, pw, ph);
+            } else {
+                mainCtx.fillStyle = '#050508'; mainCtx.fillRect(0, 0, pw, ph);
+            }
+
+            fogCtx.clearRect(0, 0, pw, ph);
+            fogCtx.save();
+            fogCtx.filter = `blur(${24 * dpr}px) brightness(1.10) saturate(0.85)`;
+            if (currentSourceType === 'webcam' && isCamActive) {
+                fogCtx.translate(pw, 0); fogCtx.scale(-1, 1); drawCoverImage(fogCtx, webcam, pw, ph);
+            } else if (currentSourceType === 'video' && localVideo.readyState >= 2) {
+                drawCoverImage(fogCtx, localVideo, pw, ph);
+            }
+            fogCtx.restore();
+
+            fogCtx.save();
+            fogCtx.fillStyle = `rgba(242, 245, 249, ${FOG_OPACITY})`;
+            fogCtx.fillRect(0, 0, pw, ph);
+            fogCtx.restore();
+
+            fogCtx.save();
+            fogCtx.globalCompositeOperation = 'source-over';
+            fogCtx.drawImage(dropletCanvas, 0, 0);
+            fogCtx.restore();
+
+            fogCtx.save();
+            fogCtx.globalCompositeOperation = 'destination-in';
+            fogCtx.drawImage(maskCanvas, 0, 0, pw, ph);
+            fogCtx.restore();
+
+            mainCtx.drawImage(fogCanvas, 0, 0);
+            drawActiveDropletHeads(mainCtx);
+
+            requestAnimationFrame(renderLoop);
+        }
+
+        function drawCoverImage(ctx, media, cw, ch) {
+            const mw = media.videoWidth || cw;
+            const mh = media.videoHeight || ch;
+            const hRatio = cw / mw; const vRatio = ch / mh;
+            const ratio = Math.max(hRatio, vRatio);
+            const shiftX = (cw - mw * ratio) / 2; const shiftY = (ch - mh * ratio) / 2;
+            ctx.drawImage(media, 0, 0, mw, mh, shiftX, shiftY, mw * ratio, mh * ratio);
+        }
+
+        function getCanvasCoordsFromMediaPipe(pt, media, cw, ch, isWebcam) {
+            const mw = media.videoWidth || cw; const mh = media.videoHeight || ch;
+            const hRatio = cw / mw; const vRatio = ch / mh;
+            const ratio = Math.max(hRatio, vRatio);
+            const shiftX = (cw - mw * ratio) / 2; const shiftY = (ch - mh * ratio) / 2;
+            let inputX = pt.x; if (isWebcam) inputX = 1 - inputX;
+            return { x: inputX * mw * ratio + shiftX, y: pt.y * mh * ratio + shiftY };
+        }
+
+        function executeSingleNodeErase(px, py, radius) {
+            maskCtx.save();
+            maskCtx.globalCompositeOperation = 'destination-out';
+            const gradient = maskCtx.createRadialGradient(px, py, radius * 0.05, px, py, radius);
+            gradient.addColorStop(0, 'rgba(0, 0, 0, 1.0)');
+            gradient.addColorStop(0.4, 'rgba(0, 0, 0, 0.85)');
+            gradient.addColorStop(0.75, 'rgba(0, 0, 0, 0.12)');
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0.0)');
+            maskCtx.fillStyle = gradient;
+            maskCtx.beginPath(); maskCtx.arc(px, py, radius, 0, Math.PI * 2); maskCtx.fill();
+            maskCtx.restore();
+
+            if (py <= 120 * dpr) {
+                clearedTopIntervals.push({ start: px - radius, end: px + radius, opacity: 1.0 });
+            }
+        }
+
+        function handlePointerContinuousErase(clientX, clientY) {
+            if (!appStarted) return;
+            const px = clientX * dpr; const py = clientY * dpr;
+            const r = NODE_BRUSH_RADIUS * 1.8 * dpr;
+
+            if (lastPointerPos) {
+                const dist = Math.hypot(px - lastPointerPos.x, py - lastPointerPos.y);
+                const steps = Math.ceil(dist / (3 * dpr)); 
+                for (let i = 0; i <= steps; i++) {
+                    const t = i / steps;
+                    const ix = lastPointerPos.x + (px - lastPointerPos.x) * t;
+                    const iy = lastPointerPos.y + (py - lastPointerPos.y) * t;
+                    executeSingleNodeErase(ix, iy, r);
+                }
+            } else {
+                executeSingleNodeErase(px, py, r);
+            }
+            lastPointerPos = { x: px, y: py };
+        }
+
+        mainCanvas.addEventListener('mousedown', (e) => { isInteracting = true; handlePointerContinuousErase(e.clientX, e.clientY); });
+        mainCanvas.addEventListener('mousemove', (e) => { if (isInteracting) handlePointerContinuousErase(e.clientX, e.clientY); });
+        window.addEventListener('mouseup', () => { isInteracting = false; lastPointerPos = null; });
+        mainCanvas.addEventListener('touchstart', (e) => { isInteracting = true; handlePointerContinuousErase(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
+        mainCanvas.addEventListener('touchmove', (e) => { if (isInteracting) handlePointerContinuousErase(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
+        window.addEventListener('touchend', () => { isInteracting = false; lastPointerPos = null; });
+
+        function eraseBoneLine(p1, p2, radius) {
+            const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            const steps = Math.ceil(dist / (4 * dpr)); 
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                const bx = p1.x + (p2.x - p1.x) * t; const by = p1.y + (p2.y - p1.y) * t;
+                executeSingleNodeErase(bx, by, radius);
+            }
+        }
+
+        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.45, minTrackingConfidence: 0.45 });
+
+        hands.onResults((results) => {
+            if (!appStarted) return;
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                updateStatus('active');
+                const hand = results.multiHandLandmarks[0];
+                const activeMedia = currentSourceType === 'webcam' ? webcam : localVideo;
+                const spread = Math.hypot(hand[8].x - hand[20].x, hand[8].y - hand[20].y); 
+                const dynamicNodeRadius = NODE_BRUSH_RADIUS * (0.85 + spread * 2.2) * dpr;
+                const nodes = hand.map(pt => getCanvasCoordsFromMediaPipe(pt, activeMedia, mainCanvas.width, mainCanvas.height, currentSourceType === 'webcam'));
+
+                const skeletonChains = [[0, 1, 2, 3, 4], [0, 5, 6, 7, 8], [0, 9, 10, 11, 12], [0, 13, 14, 15, 16], [0, 17, 18, 19, 20], [5, 9, 13, 17]];
+                skeletonChains.forEach(chain => {
+                    for (let i = 0; i < chain.length - 1; i++) { eraseBoneLine(nodes[chain[i]], nodes[chain[i+1]], dynamicNodeRadius); }
+                });
+
+                if (lastHandSkeleton && lastHandSkeleton.length === nodes.length) {
+                    const keyAnchors = [0, 4, 8, 12, 16, 20, 9];
+                    keyAnchors.forEach(idx => { eraseBoneLine(lastHandSkeleton[idx], nodes[idx], dynamicNodeRadius); });
+                }
+                lastHandSkeleton = nodes;
+            } else {
+                if (currentSourceType === 'webcam' && isCamActive) updateStatus('ready');
+                lastHandSkeleton = null;
+            }
+        });
+
+        async function runNativeWebcamFrameLoop() {
+            if (!appStarted) return;
+            if (currentSourceType === 'webcam' && isCamActive) {
+                if (webcam.readyState >= 2) { try { await hands.send({ image: webcam }); } catch(e) {} }
+                requestAnimationFrame(runNativeWebcamFrameLoop);
+            }
+        }
+
+        let lastProcessTime = 0;
+        async function processVideoFrame() {
+            if (!appStarted) return;
+            if (currentSourceType === 'webcam') return;
+            if (currentSourceType === 'video' && !localVideo.paused) {
+                const now = performance.now();
+                if (now - lastProcessTime > 30) { 
+                    if (localVideo.readyState >= 2) { try { await hands.send({ image: localVideo }); } catch(e) {} }
+                    lastProcessTime = now;
+                }
+            }
+            requestAnimationFrame(processVideoFrame);
+        }
+
+        function setupWebcam() {
+            if (!appStarted) return;
+            if (nativeStream) {
+                webcam.play().then(() => { isCamActive = true; updateStatus('ready'); runNativeWebcamFrameLoop(); }).catch(err => { updateStatus('error'); });
+                return;
+            }
+            updateStatus('loading');
+            navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: "user" }, audio: false })
+            .then(stream => {
+                nativeStream = stream; webcam.srcObject = stream;
+                webcam.addEventListener('loadedmetadata', () => {
+                    webcam.play().then(() => { isCamActive = true; updateStatus('ready'); runNativeWebcamFrameLoop(); });
+                });
+            })
+            .catch(err => { updateStatus('error'); switchSource('video'); });
+        }
+
+        function updateStatus(state) {
+            if (state === 'active') statusIndicator.className = "w-2 h-2 rounded-full bg-emerald-400"; 
+            else if (state === 'ready') statusIndicator.className = "w-2 h-2 rounded-full bg-sky-400";     
+            else if (state === 'loading') statusIndicator.className = "w-2 h-2 rounded-full bg-amber-400 animate-pulse"; 
+            else statusIndicator.className = "w-2 h-2 rounded-full bg-rose-500";   
+        }
+
+        function switchSource(type) {
+            currentSourceType = type; updateUIState();
+            if (type === 'webcam') { localVideo.pause(); setupWebcam(); } 
+            else if (type === 'video') { isCamActive = false; webcam.pause(); videoUpload.click(); }
+        }
+
+        videoUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                updateStatus('loading'); localVideo.src = URL.createObjectURL(file);
+                localVideo.addEventListener('loadedmetadata', () => {
+                    localVideo.play().then(() => { updateStatus('ready'); requestAnimationFrame(processVideoFrame); });
+                });
+            } else { switchSource('webcam'); }
+        });
+
+        // 🌟 新增：切换全屏净界模式
+        toggleUiBtn.addEventListener('click', () => {
+            uiVisible = !uiVisible;
+            toggleUiBtn.innerText = uiVisible ? "👁️" : "🙈";
+            controlPanel.classList.toggle('ui-hidden', !uiVisible);
+        });
+
+        modeRecover.addEventListener('click', () => { eraseMode = 'recover'; updateUIState(); });
+        modeDissolve.addEventListener('click', () => { eraseMode = 'dissolve'; updateUIState(); });
+        srcCam.addEventListener('click', () => switchSource('webcam'));
+        srcLocal.addEventListener('click', () => switchSource('video'));
+
+        // 🌟 新增：开启体验按钮的激活逻辑
+        document.getElementById('start-btn').addEventListener('click', () => {
+            appStarted = true;
+            document.getElementById('start-mask').style.opacity = '0';
+            document.getElementById('start-mask').style.visibility = 'hidden';
+            
+            // 完美触发首帧渲染与硬件流请求
+            switchSource('webcam');
+            renderLoop();
+        });
+
+        updateUIState();
+    </script>
+</body>
+</html>
